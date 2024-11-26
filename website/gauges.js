@@ -51,7 +51,7 @@ function generateGauges(config) {
 		colors      : gaugeColors,
 		dials       : [
 			{
-				id          : 'dcVoltageDial',
+				id          : 'MC_DCVoltageDial',
 				title       : "DC Voltage",
 				units       : 'Vdc',
 				minValue    : rangeBatteryVoltage.min,
@@ -68,7 +68,7 @@ function generateGauges(config) {
 
 			},
 			{
-				id          : 'socDial',
+				id          : 'BMS_SOCDial',
 				title       : "SOC",
 				units       : '%',
 				minValue    : rangeSoc.min,
@@ -90,7 +90,7 @@ function generateGauges(config) {
 				}
 			},
 			{
-				id          : 'dcCurrentDial',
+				id          : 'MC_DCCurrentDial',
 				title       : "DC Current",
 				units       : 'Amps',
 				minValue    : rangeCurrent.min,
@@ -122,8 +122,8 @@ function generateGauges(config) {
 		height      : 450,
 		colors      : gaugeColors,
 		dials       : [
-/*			{
-				id          : 'speedActualDial',
+			{
+				id          : 'MC_SpeedActDial',
 				title       : "RPM",
 				units       : '',
 				minValue    : rangeRpm.min,
@@ -142,9 +142,8 @@ function generateGauges(config) {
 					duration : 100
 				}
 			},
-*/
 			{
-				id          : 'throttleDial',
+				id          : 'Throttle_LevelDial',
 				title       : "Throttle",
 				units       : '',
 				minValue    : -100,
@@ -164,7 +163,7 @@ function generateGauges(config) {
 				}
 			},
 			{
-				id          : 'torqueActualDial',
+				id          : 'MC_TorqueActDial',
 				title       : "Torque",
 				units       : 'Nm',
 				minValue    : rangeTorque.min,
@@ -196,7 +195,7 @@ function generateGauges(config) {
 		colors      : gaugeColors,
 		dials       : [
 			{
-				id          : 'temperatureMotorDial',
+				id          : 'MC_MotorTempDial',
 				title       : "Motor",
 				units       : '\u2103',
 				minValue    : rangeMotor.min,
@@ -217,7 +216,7 @@ function generateGauges(config) {
 				}
 			},
 			{
-				id          : 'temperatureControllerDial',
+				id          : 'MC_InverterTempDial',
 				title       : "Controller",
 				units       : '\u2103',
 				minValue    : rangeController.min,

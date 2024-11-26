@@ -1,6 +1,6 @@
 #include <ArduinoOTA.h>
 #include <FS.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
 #include <AsyncTCP.h>
@@ -8,149 +8,64 @@
 #include <ArduinoJson.h>
 #include "esp_task_wdt.h"
 
+//causes several lines of text to get sent to GEVCU7 to give more feedback about what is going on.
+//#define EXTRA_DEBUG
+
+//defining this causes the code to create a web server upon wifi connection
+#define WEBINTERFACE
+
+//and, defining this creates two telnet interfaces for the two serial ports on GEVCU7
+#define TELNET
+
 // SKETCH BEGIN
+
+#ifdef WEBINTERFACE
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 AsyncEventSource events("/events");
-WiFiServer telnetServer(23);
-WiFiClient telnetClient;
-WiFiClient wifiClient;
-String lineBuffer;
-char tcpBuffer[1500];
+#endif
 
+#ifdef TELNET
+WiFiServer telnetServer(23);
+WiFiServer statusServer(2323);
+WiFiClient telnetClient;
+WiFiClient statusClient;
+#endif
+WiFiClient wifiClient;
+WiFiUDP wifiUDPServer;
+String lineBuffer;
+#ifdef TELNET
+char tcpBuffer[1500];
 char telnetOutBuff[1200];
 uint16_t telnetOutBuffLength;
 uint32_t telnetOutLastWrite;
+#endif
 
 int OTAcount = 0;
 char ssid[80];
 char password[80];
 char hostName[80];
 uint8_t wifiMode; //0 = create a mini-AP, 1 = connect to an AP
+uint8_t softAPActive = false;
 
 uint32_t stamp = 0;
 int cnt = 0;
+uint32_t lastBroadcast;
 char buffer[200];
+
+#ifdef TELNET
 char telnetInputBuff[1000];
+char statusInputBuff[100];
 uint16_t telnetInputBuffIdx = 0;
+uint16_t statusInputBuffIdx = 0;
+#endif
 
 const char* http_username = "admin";
 const char* http_password = "admin";
 
-/*
- * These below values set the various stuff you can currently set over websockets to the gevcu website.
- * It would set configuration options via a special interface that replaced ~Var~ instances with
- * actual values. But, the way the ESP32 works doesn't make that very simple. 
- * But, these below values are currently being sent over the websocket and are just json. So, 
- * it will be easy enough to have the TeensyMM side send json with parameters and get back json
- * with changes in order to operate. GEVCU7 is connected to the ESP32 over "Serial" at 115200
- * so use those settings at the other side too and just send us JSON for now. But, some
- * json will be for control of this system and not to update parameters on the website.
- * For one, we need to be able to set the wifi parameters:
- * esp32_ssid = ssid either to connect to or create
- * esp32_pw = Password for wifi either to connect to or create. If creating it'll be WPA2
- * esp32_wifimode = "CLIENT" if connecting to an SSID AP or "SERVER" if creating a softAP
- * 
- * 115200 gives us 11,520 characters per second. If the average json item is 27 bytes long
- * then that gives 426 updated items per second. There are 72 below so even running through
- * them all the serial link could do about 6 updates per second. Not all items will need
- * to update that frequently anyway so the load will be less.
- */
+static IPAddress broadcastAddr(255,255,255,255);
 
-const String vals[] = {
-"{\"systemState\": 8}",
-"{\"timeRunning\": \"12:34:56\"}",
-"{\"torqueActual\": 10.2}",
-"{\"speedActual\": 45.2}",
-"{\"throttle\": 23}",
-"{\"dcVoltage\": 364.23}",
-"{\"dcCurrent\": -23.43}",
-"{\"acCurrent\": -10.42}",
-"{\"temperatureMotor\": 30.43}",
-"{\"temperatureController\": 43.22}",
-"{\"mechanicalPower\": 234.00}",
-"{\"bitfieldMotor\": 0}",
-"{\"bitfieldBms\": 0}",
-"{\"bitfieldIO\": 45}",
-"{\"dcDcHvVoltage\": 345.00}",
-"{\"dcDcLvVoltage\": 14.34}",
-"{\"dcDcHvCurrent\": 1.00}",
-"{\"dcDcLvCurrent\": 34.00}",
-"{\"dcDcTemperature\": 52.32}",
-"{\"chargerInputVoltage\": 245.33}",
-"{\"chargerInputCurrent\": 13.53}",
-"{\"chargerBatteryVoltage\": 363.34}",
-"{\"chargerBatteryCurrent\": 12.34}",
-"{\"chargerTemperature\": 23.34}",
-"{\"chargerInputCurrentTarget\": 15.00}",
-"{\"chargeHoursRemain\": 2.342}",
-"{\"chargeMinsRemain\": 0.00}",
-"{\"chargeLevel\": 52.34}",
-"{\"flowCoolant\": 1.00}",
-"{\"flowHeater\": 2.00}",
-"{\"heaterPower\": 232.00}",
-"{\"temperatureBattery1\": 21.0}", 
-"{\"temperatureBattery2\": 23.0}", 
-"{\"temperatureBattery3\": 25.0}", 
-"{\"temperatureBattery4\": 27.0}",
-"{\"temperatureBattery5\": 29.0}", 
-"{\"temperatureBattery6\": 31.0}",
-"{\"temperatureCoolant\": 34.00}",
-"{\"temperatureHeater\": 12.00}",
-"{\"temperatureExterior\": 10.32}",
-"{\"powerSteering\": 1}",
-"{\"enableRegen\": true}",
-"{\"enableHeater\": false}",
-"{\"enableCreep\": true}",
-"{\"cruiseSpeed\": true}",
-"{\"enableCruiseControl\": true}",
-"{\"soc\": 62.43}",
-"{\"dischargeLimit\": 100.42}",
-"{\"chargeLimit\": 234.00}",
-"{\"chargeAllowed\": 0}",
-"{\"dischargeAllowed\": 1}",
-"{\"lowestCellTemp\": -1.00}",
-"{\"highestCellTemp\": 23.00}",
-"{\"lowestCellVolts\": 3.24}",
-"{\"highestCellVolts\": 4.1}",
-"{\"averageCellVolts\": 3.6}",
-"{\"deltaCellVolts\": 0.123}",
-"{\"lowestCellResistance\": 0.001}",
-"{\"highestCellResistance\": 0.02}",
-"{\"averageCellResistance\": 0.004}",
-"{\"deltaCellResistance\": 0.0044}",
-"{\"lowestCellTempId\": 0}",
-"{\"highestCellTempId\": 12}",
-"{\"lowestCellVoltsId\": 42}",
-"{\"highestCellVoltsId\": 23}",
-"{\"lowestCellResistanceId\": 12}",
-"{\"highestCellResistanceId\": 42}",
-"{\"packResistance\": 0.0001}",
-"{\"packHealth\": 84.52}",
-"{\"packCycles\": 2345}",
-"{\"bmsTemp\": 23.23}",
-"\"limits\": {\"dcVoltage\": {\"min\": 200.0, \"max\": 400.0},\"dcCurrent\": {\"min\": 0.0, \"max\": 336.34},\"temperatureController\": {\"min\": 0, \"max\": 60.0},\"temperatureMotor\": {\"min\": 0, \"max\": 90.0} }",
-
-"{\"minimumLevel\": 500}",
-"{\"minimumLevel2\": 4000}",
-"{\"maximumLevel\": 2500}",
-"{\"maximumLevel2\": 2000}",
-"{\"positionRegenMaximum\": 5}",
-"{\"positionRegenMaximum\": 15}",
-"{\"positionForwardStart\": 20}",
-"{\"positionHalfPower\": 65}",
-"{\"minimumRegen\": 5}",
-"{\"maximumRegen\": 75}",
-"{\"creepLevel\": 2}",
-"{\"creepSpeed\": 400}",
-"{\"brakeHold\": 10}",
-"{\"brakeMinimumLevel\": 200}",
-"{\"brakeMinimumRegen\": 10}",
-"{\"brakeMaximumLevel\": 2000}",
-"{\"brakeMaximumRegen\": 90}",
-"{\"inputCurrent\": 10}",
-};
-
+#ifdef TELNET
 void sendTelnetLine(const char *line)
 {
     if (telnetClient && telnetClient.connected())
@@ -158,25 +73,41 @@ void sendTelnetLine(const char *line)
         telnetClient.println(line);
     }
 }
+#endif
 
 void printSerialAndTelnet(String line)
 {
     printf("%s", line.c_str());
+#ifdef TELNET
     if (telnetClient && telnetClient.connected())
     {
         telnetClient.println(line);
     }
+#endif
 }
+
+#ifdef TELNET
+void printStatusToNetwork(String line)
+{
+    if (statusClient && statusClient.connected())
+    {
+        statusClient.println(line);
+    }
+}
+#endif
 
 void printlnSerialAndTelnet(String line)
 {
     printf("%s\n", line.c_str());
+#ifdef TELNET
     if (telnetClient && telnetClient.connected())
     {
         telnetClient.println(line);
     }
+#endif
 }
 
+#ifdef TELNET
 void sendTelnetBytes(const char *data, int length)
 {
     if (telnetClient && telnetClient.connected())
@@ -184,13 +115,15 @@ void sendTelnetBytes(const char *data, int length)
         telnetClient.write(data, length);
     }
 }
+#endif
 
+#ifdef WEBINTERFACE
 void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len){
     if(type == WS_EVT_CONNECT)
     {
         Serial.printf("ws[%s][%u] connect\n", server->url(), client->id());
-        client->printf("Hello Client %u :)", client->id());
-        client->ping();
+        //client->printf("Hello Client %u :)", client->id());
+        //client->ping();
     }
     else if(type == WS_EVT_DISCONNECT)
     {
@@ -200,13 +133,14 @@ void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventT
     {
         Serial.printf("ws[%s][%u] error(%u): %s\n", server->url(), client->id(), *((uint16_t*)arg), (char*)data);
     } 
-    else if(type == WS_EVT_PONG)
-    {
-        Serial.printf("ws[%s][%u] pong[%u]: %s\n", server->url(), client->id(), len, (len)?(char*)data:"");
-        client->text("PONG BRO!");
-    }
+    //else if(type == WS_EVT_PONG)
+    //{
+    //    Serial.printf("ws[%s][%u] pong[%u]: %s\n", server->url(), client->id(), len, (len)?(char*)data:"");
+    //    client->text("PONG BRO!");
+    //}
     else if(type == WS_EVT_DATA)
     {
+        /*
         AwsFrameInfo * info = (AwsFrameInfo*)arg;
         String msg = "";
         if(info->final && info->index == 0 && info->len == len)
@@ -279,9 +213,11 @@ void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventT
                         client->binary("I got your binary message");
                 }
             }
-        }
+        }*/
+
     }
 }
+#endif
 
 void attemptConnection()
 {
@@ -290,6 +226,7 @@ void attemptConnection()
         WiFi.mode(WIFI_AP_STA);
         if (strlen(password) > 0) WiFi.softAP(ssid, password);
         else WiFi.softAP(ssid); //open AP
+        softAPActive = true;
     }
     else
     {        
@@ -305,6 +242,7 @@ void attemptConnection()
         WiFi.setAutoReconnect(true); //if we did connect then try to reconnect on failure
     }
 
+#ifdef WEBINTERFACE
     //Send OTA events to the browser
     ArduinoOTA.onStart([]() { events.send("Update Start", "ota"); });
     ArduinoOTA.onEnd([]() { events.send("Update End", "ota"); });
@@ -314,6 +252,7 @@ void attemptConnection()
         sprintf(p, "Progress: %u%%\n", (progress/(total/100)));
         events.send(p, "ota");
     });
+
     ArduinoOTA.onError([](ota_error_t error)
     {
         if(error == OTA_AUTH_ERROR) events.send("Auth Failed", "ota");
@@ -322,33 +261,36 @@ void attemptConnection()
         else if(error == OTA_RECEIVE_ERROR) events.send("Recieve Failed", "ota");
         else if(error == OTA_END_ERROR) events.send("End Failed", "ota");
     });
+#endif
+
     ArduinoOTA.setHostname(hostName);
     ArduinoOTA.begin();
 
+#ifdef TELNET
     telnetServer.end();
     telnetServer.begin(23);
     telnetServer.setNoDelay(true);
 
+    statusServer.end();
+    statusServer.begin(2323);
+    statusServer.setNoDelay(true);
+#endif
+
     MDNS.begin(hostName);
-    MDNS.addService("http","tcp",80);
     MDNS.addService("telnet","tcp", 23);
+    MDNS.addService("status","tcp", 2323);
+
+#ifdef WEBINTERFACE
+    MDNS.addService("http","tcp",80);
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
-
-    events.onConnect([](AsyncEventSourceClient *client)
-    {
-        //client->send("hello!",NULL,millis(),1000);
-    });
-    server.addHandler(&events);
-
-    //server.addHandler(new SPIFFSEditor(SPIFFS, http_username,http_password));
   
     server.on("/heap", HTTP_GET, [](AsyncWebServerRequest *request)
     {
         request->send(200, "text/plain", String(ESP.getFreeHeap()));
     });
 
-    server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
+    server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
     server.onNotFound([](AsyncWebServerRequest *request)
     {
@@ -423,6 +365,7 @@ void attemptConnection()
             Serial.printf("BodyEnd: %u\n", total);
     });
     server.begin();
+#endif
 
     if (wifiMode == 1) Serial.println(WiFi.localIP());
     if (wifiMode == 0) Serial.println(WiFi.softAPIP());
@@ -432,7 +375,7 @@ void setup()
 {
     //Serial.setRxBufferSize(2048);
     //Serial.setTxBufferSize(2048);
-    Serial.begin(115200);
+    Serial.begin(230400);
     delay(3000);
     //Serial.setDebugOutput(true);
 
@@ -440,17 +383,22 @@ void setup()
     password[0] = 0;
     hostName[0] = 0;
     wifiMode = 0;
+    lastBroadcast = 0;
+#ifdef TELNET
     telnetOutBuffLength = 0;
     telnetOutLastWrite = millis();
     telnetInputBuffIdx = 0;
+    statusInputBuffIdx = 0;
     memset(telnetInputBuff, 0, 1000);
-
+#endif
     //attemptConnection();
 
-    Serial.println("About to start SPIFFS");
+    Serial.println("About to start LittleFS");
 
-    SPIFFS.begin(false, "/spiffs", 20);
-
+    if(!LittleFS.begin(false))
+    {
+        Serial.println("LittleFS Mount Failed");
+    }
     //Serial.println(SPIFFS.totalBytes(), HEX);
     //Serial.println(SPIFFS.usedBytes(), HEX);
 
@@ -486,19 +434,10 @@ char *getTimeRunning()
 void loop()
 {
     ArduinoOTA.handle();
-    ws.cleanupClients();
-    if (millis() > (stamp + 40))
-    {
-        stamp = millis();
-        //TODO: Here is where the above parameters are sent over and over to the webpage to update settings.
-        //This should instead be getting values from GEVCU7 to update settings. 
-        if (WiFi.isConnected()) ws.printfAll(vals[cnt].c_str());
-        cnt = (cnt + 1) % 90;
 
-        //just to give feedback that we're doing something. But, it's kind of annoying too.
-        //Serial.write('!');
-        //if (cnt == 0) Serial.println();
-    }
+#ifdef WEBINTERFACE    
+    ws.cleanupClients();
+#endif
     while (Serial.available())
     {
         char c = Serial.read();
@@ -507,7 +446,7 @@ void loop()
             //handle input here
             if (lineBuffer[0] == '{')
             {
-                StaticJsonDocument<300>doc;
+                StaticJsonDocument<3000>doc;
                 DeserializationError err = deserializeJson(doc, lineBuffer.c_str());
                 if (err)
                 {
@@ -525,22 +464,40 @@ void loop()
                         wifiMode = doc["WiFiMode"];
                         attemptConnection();
                     }
+                    else
+                    {
+                        ws.textAll(lineBuffer.c_str()); //just send it as-is as it was already json formatted
+                        //Serial.println(lineBuffer.c_str());
+                    }
                 }
             }
             if (lineBuffer[0] == '~')
             {
                 //lineBuffer += "\n"; //make sure to send the line ending too.
                 lineBuffer[0] = ' ';
+#ifdef TELNET
                 telnetOutBuffLength += sprintf(&telnetOutBuff[telnetOutBuffLength], "%s\n", lineBuffer.c_str());
                 //Serial.println(telnetOutBuffLength);
                 //sendTelnetLine(lineBuffer.c_str());
+#endif
+            }
+
+            if (lineBuffer[0] == '`')
+            {
+                //lineBuffer += "\n"; //make sure to send the line ending too.
+                lineBuffer[0] = ' ';
+#ifdef TELNET
+                //telnetOutBuffLength += sprintf(&telnetOutBuff[telnetOutBuffLength], "%s\n", lineBuffer.c_str());
+                //Serial.println(telnetOutBuffLength);
+                printStatusToNetwork(lineBuffer);
+#endif
             }
 
             lineBuffer = "";
         }
         else lineBuffer += c;
     }
-    
+#ifdef TELNET    
     //if telnet buffer is getting full or 300ms has gone by then flush the buffer
     if ( 
         (telnetOutBuffLength > 1000) 
@@ -551,9 +508,19 @@ void loop()
         telnetOutBuffLength = 0;
         telnetOutLastWrite = millis();
     } 
+#endif
 
-    if (WiFi.status() == WL_CONNECTED)
+    if ( (WiFi.status() == WL_CONNECTED) || (softAPActive == true) )
     {
+        if ((micros() - lastBroadcast) > 1000000ul) //every second send out a broadcast ping
+        {
+            lastBroadcast = micros();
+            wifiUDPServer.beginPacket(broadcastAddr, 17222);
+            wifiUDPServer.write((uint8_t *)hostName, strlen(hostName));
+            wifiUDPServer.endPacket();
+        }
+
+#ifdef TELNET
         if (telnetServer.hasClient())
         {
             telnetClient = telnetServer.available();
@@ -563,6 +530,23 @@ void loop()
             {
                 int retBytes = telnetClient.read((uint8_t *)tcpBuffer, 1500);
             }
+#ifdef EXTRA_DEBUG
+            Serial.println("Got a new telnet client");
+#endif
+        }
+
+        if (statusServer.hasClient())
+        {
+            statusClient = statusServer.available();
+            delay(100);
+            //grab any extra crap that comes in at the start of the connection and throw it away.
+            while (statusClient.available())
+            {
+                int retBytes = statusClient.read((uint8_t *)tcpBuffer, 1500);
+            }
+#ifdef EXTRA_DEBUG
+            Serial.println("Got a new status client");
+#endif
         }
 
         if (telnetClient && telnetClient.connected())
@@ -570,7 +554,9 @@ void loop()
             while (telnetClient.available() > 0)
             {
                 int retBytes = telnetClient.read((uint8_t *)tcpBuffer, 1500);
-                
+#ifdef EXTRA_DEBUG
+                Serial.printf("Got %i from telnet client\n", retBytes);
+#endif                
                 for (int i = 0; i < retBytes; i++)
                 {
                     telnetInputBuff[telnetInputBuffIdx++] = tcpBuffer[i];
@@ -584,8 +570,30 @@ void loop()
                 }
             }
         }
-    }
 
+        if (statusClient && statusClient.connected())
+        {
+            while (statusClient.available() > 0)
+            {
+                int retBytes = statusClient.read((uint8_t *)tcpBuffer, 1500);
+#ifdef EXTRA_DEBUG
+                Serial.printf("Got %i from status client\n", retBytes);
+#endif
+                
+                for (int i = 0; i < retBytes; i++)
+                {
+                    statusInputBuff[statusInputBuffIdx++] = tcpBuffer[i];
+                    if (tcpBuffer[i] == '\n') //dump buffer at line breaks
+                    {
+                        Serial.write('`');
+                        Serial.write(statusInputBuff, statusInputBuffIdx);
+                        statusInputBuffIdx = 0;
+                    }
+                }
+            }
+        }
+#endif
+    }
 }
 
 // Utility to extract header value from headers
@@ -798,13 +806,13 @@ void execOTA(int type)
     else if (type == 265)
     {
         bin = "/GEVCU7_ESP32_WebPage.debug.bin";
-        SPIFFS.end(); //close it so we can reopen it and hopefully have the updated copy once we're done loading
+        LittleFS.end(); //close it so we can reopen it and hopefully have the updated copy once we're done loading
     }
     else bin = "/GEVCU7_ESP32_WebPage.bin"; // normal webpage file
     loadOTAFile(host, bin, false); //spiffs file for webpage
     if (type == 265)  //in this case, do not do a firmware upgrade.
     {
-        SPIFFS.begin(false, "/spiffs", 20); //re-open SPIFFS with the new image
+        LittleFS.begin();
         return;
     }
 

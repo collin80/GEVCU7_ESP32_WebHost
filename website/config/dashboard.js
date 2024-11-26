@@ -1,5 +1,5 @@
 {
-	"torqueRange": [ -300,300 ],
+	"torqueRange": [ -500,500 ],
 	"rpmRange": [ 0, 8000 ],
 	"currentRange": [ -200, 200 ],
 	"motorTempRange": [ 0, 90, 120 ],
