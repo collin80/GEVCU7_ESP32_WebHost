@@ -65,6 +65,9 @@ const char* http_password = "admin";
 
 static IPAddress broadcastAddr(255,255,255,255);
 
+bool loadTeensyFile(String filename);
+void execOTA(int type);
+
 #ifdef TELNET
 void sendTelnetLine(const char *line)
 {
@@ -266,6 +269,8 @@ void attemptConnection()
     ArduinoOTA.setHostname(hostName);
     ArduinoOTA.begin();
 
+    MDNS.begin(hostName);
+
 #ifdef TELNET
     telnetServer.end();
     telnetServer.begin(23);
@@ -274,11 +279,10 @@ void attemptConnection()
     statusServer.end();
     statusServer.begin(2323);
     statusServer.setNoDelay(true);
-#endif
 
-    MDNS.begin(hostName);
     MDNS.addService("telnet","tcp", 23);
     MDNS.addService("status","tcp", 2323);
+#endif
 
 #ifdef WEBINTERFACE
     MDNS.addService("http","tcp",80);
@@ -323,14 +327,14 @@ void attemptConnection()
         int i;
         for(i=0;i<headers;i++)
         {
-            AsyncWebHeader* h = request->getHeader(i);
+            AsyncWebHeader* h = (AsyncWebHeader *)request->getHeader(i);
             Serial.printf("_HEADER[%s]: %s\n", h->name().c_str(), h->value().c_str());
         }
 
         int params = request->params();
         for(i=0;i<params;i++)
         {
-            AsyncWebParameter* p = request->getParam(i);
+            AsyncWebParameter* p = (AsyncWebParameter *)request->getParam(i);
             if(p->isFile())
             {
                 Serial.printf("_FILE[%s]: %s, size: %u\n", p->name().c_str(), p->value().c_str(), p->size());
@@ -373,10 +377,10 @@ void attemptConnection()
 
 void setup()
 {
-    //Serial.setRxBufferSize(2048);
-    //Serial.setTxBufferSize(2048);
+    Serial.setRxBufferSize(1024);
+    Serial.setTxBufferSize(1024);
     Serial.begin(230400);
-    delay(3000);
+    delay(2000);
     //Serial.setDebugOutput(true);
 
     ssid[0] = 0;
@@ -446,7 +450,7 @@ void loop()
             //handle input here
             if (lineBuffer[0] == '{')
             {
-                StaticJsonDocument<3000>doc;
+                StaticJsonDocument<5000>doc;
                 DeserializationError err = deserializeJson(doc, lineBuffer.c_str());
                 if (err)
                 {
@@ -464,10 +468,16 @@ void loop()
                         wifiMode = doc["WiFiMode"];
                         attemptConnection();
                     }
-                    else
+                    else if (obj.containsKey("FWUPD"))
                     {
-                        ws.textAll(lineBuffer.c_str()); //just send it as-is as it was already json formatted
-                        //Serial.println(lineBuffer.c_str());
+                        String filename = doc["FWUPD"];
+                        if (filename.length() < 2) filename = "GEVCU7";
+                        loadTeensyFile(filename);
+                    }
+                    else if (obj.containsKey("ESPUPD"))
+                    {
+                        int updateType = doc["ESPUPD"];                        
+                        execOTA(updateType);
                     }
                 }
             }
@@ -617,10 +627,106 @@ void onOTAProgress(uint32_t progress, size_t fullSize)
     else printf("..%u", progress);
 }
 
-bool loadOTAFile(String host, String filename, bool isMainFirmware)
+//see the below loadOTAFile version for the comments about how this all works
+bool loadTeensyFile(String filename)
 {
     int contentLength = 0;
     bool isValidContentType = false;
+
+    String host = "firmware.evtv.me";
+    filename = "/" + filename + ".hex";
+
+    if (wifiClient.connect(host.c_str(), 80))
+    {
+        wifiClient.print(String("GET ") + filename + " HTTP/1.1\r\n" +
+                         "Host: " + host + "\r\n" +
+                         "Cache-Control: no-cache\r\n" +
+                         "Connection: close\r\n\r\n");  // Get the contents of the bin file
+
+        unsigned long timeout = millis();
+        while (wifiClient.available() == 0)
+        {
+            if ( (millis() - timeout) > 5000 )
+            {
+                printlnSerialAndTelnet("Client Timeout !");
+                wifiClient.stop();
+                return false;
+            }
+        }
+        while (wifiClient.available())
+        {
+            String line = wifiClient.readStringUntil('\n');// read line till /n
+            line.trim();// remove space, to check if the line is end of headers
+
+            if (!line.length()) {
+                break;
+            }
+
+            // Check if the HTTP Response is 200 else break and Exit Update
+            if (line.startsWith("HTTP/1.1"))
+            {
+                if (line.indexOf("200") < 0)
+                {
+                    printlnSerialAndTelnet("FAIL...Got a non 200 status code from server. Exiting OTA Update.");
+                    break;
+                }
+            }
+
+            if (line.startsWith("Content-Length: "))
+            {
+                contentLength = atoi((getHeaderValue(line, "Content-Length: ")).c_str());
+                printlnSerialAndTelnet("              ...Server indicates " + String(contentLength) + " byte file size\n");
+            }
+
+            if (line.startsWith("Content-Type: "))
+            {
+                String contentType = getHeaderValue(line, "Content-Type: ");
+                printlnSerialAndTelnet("\n              ...Server indicates correct " + contentType + " payload.\n");
+                if (contentType == "binary/octet-stream")
+                {
+                    isValidContentType = true;
+                }
+            }
+        } //end while client available
+    }
+    else {
+        // Connection failed
+        printlnSerialAndTelnet("Connection to " + String(host) + " failed. Please check your setup");
+    }
+
+    //Serial.println("File length: " + String(contentLength) + ", Valid Content Type flag:" + String(isValidContentType));
+
+    // check contentLength and content type
+    if (contentLength && isValidContentType) // Check if there is enough to OTA Update
+    {
+        printlnSerialAndTelnet("Everything checks out. Starting hex stream");
+        Serial.write((char)0xA5); //signals to teensy that we're about to send an update
+        delay(250); //wait a little bit for the teensy side to be ready to receive
+        while (1) //no idea how we'd stop this. But, teensy is likely to reboot if it all worked
+        {
+            //printSerialAndTelnet("We have space for the update...starting transfer... \n\n");
+            // delay(1100);
+            //size_t written = Update.writeStream(wifiClient);
+            String line = wifiClient.readStringUntil('\n');// read line till /n
+            line.trim();// remove space, to check if the line is end of headers
+            if (line.length() > 2) Serial.println(line); //don't send any blank lines in case they appear
+            delay(2); //about enough time to send a whole line
+        } //end if can begin
+    } //End contentLength && isValidContentType
+    else
+    {
+        //printlnSerialAndTelnet("There was no content in the response");
+        wifiClient.flush();
+        return false;
+    }
+    return true;
+}
+
+bool loadOTAFile(String filename, bool isMainFirmware)
+{
+    int contentLength = 0;
+    bool isValidContentType = false;
+    String host = "firmware.evtv.me";
 
     //printlnSerialAndTelnet("Connecting to AWS server: " + String(host)); // Connect to S3
 
@@ -794,7 +900,6 @@ void execOTA(int type)
         return;
     }
 
-    String host = "firmware.evtv.me"; // Host => bucket-name.s3.region.amazonaws.com
     String bin;
     //all filenames should have a slash to start
 
@@ -809,7 +914,7 @@ void execOTA(int type)
         LittleFS.end(); //close it so we can reopen it and hopefully have the updated copy once we're done loading
     }
     else bin = "/GEVCU7_ESP32_WebPage.bin"; // normal webpage file
-    loadOTAFile(host, bin, false); //spiffs file for webpage
+    loadOTAFile(bin, false); //spiffs file for webpage
     if (type == 265)  //in this case, do not do a firmware upgrade.
     {
         LittleFS.begin();
@@ -819,6 +924,6 @@ void execOTA(int type)
     if (type == 1234) bin = "/GEVCU7_ESP32_WebHost.test.bin"; // test firmware for special people
     else if (type == 1337) bin = "/GEVCU7_ESP32_WebHost.debug.bin"; // test firmware probably just for Collin
     else bin = "/GEVCU7_ESP32_WebHost.bin"; // normal firmware file
-    loadOTAFile(host, bin, true);
+    loadOTAFile(bin, true);
 
 } //End execOTA()
