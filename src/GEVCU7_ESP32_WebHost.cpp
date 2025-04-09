@@ -709,8 +709,12 @@ bool loadTeensyFile(String filename)
             //size_t written = Update.writeStream(wifiClient);
             String line = wifiClient.readStringUntil('\n');// read line till /n
             line.trim();// remove space, to check if the line is end of headers
-            if (line.length() > 2) Serial.println(line); //don't send any blank lines in case they appear
-            delay(2); //about enough time to send a whole line
+            if (line.length() > 2) 
+            {
+                //wait for a 0x97 byte before sending the line
+                while (Serial.read() != 0x97);
+                Serial.println(line); //don't send any blank lines in case they appear
+            }
         } //end if can begin
     } //End contentLength && isValidContentType
     else
