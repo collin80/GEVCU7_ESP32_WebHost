@@ -614,17 +614,19 @@ String getHeaderValue(String header, String headerName)
 
 void onOTAProgress(uint32_t progress, size_t fullSize)
 {
-
     //esp_task_wdt_reset();
     // printf("%u of %u bytes written to memory...\n", progress, fullSize);
 
+    char buff[30];
+    sprintf(buff, "..%u", progress);
+
+    printlnSerialAndTelnet(buff);
 
     if (OTAcount++ == 10)
     {
-        printf("..%u\n", progress);
+        printf("\n");
         OTAcount = 0;
     }
-    else printf("..%u", progress);
 }
 
 //see the below loadOTAFile version for the comments about how this all works
@@ -852,7 +854,7 @@ bool loadOTAFile(String filename, bool isMainFirmware)
                 {
                     if (isMainFirmware)
                     {
-                        //printlnSerialAndTelnet("Rebooting new firmware...\n");
+                        printlnSerialAndTelnet("Rebooting new firmware...\n");
                         yield();
                         delay(1000);
                         ESP.restart();
