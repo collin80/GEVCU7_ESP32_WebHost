@@ -67,6 +67,7 @@ static IPAddress broadcastAddr(255,255,255,255);
 
 bool loadTeensyFile(String filename);
 void execOTA(int type);
+bool loadTeensyFromTelnet();
 
 #ifdef TELNET
 void sendTelnetLine(const char *line)
@@ -245,9 +246,16 @@ void attemptConnection()
         WiFi.setAutoReconnect(true); //if we did connect then try to reconnect on failure
     }
 
-#ifdef WEBINTERFACE
     //Send OTA events to the browser
-    ArduinoOTA.onStart([]() { events.send("Update Start", "ota"); });
+    ArduinoOTA.onStart([]() { 
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH) {
+            type = "sketch";
+        } else {  // U_SPIFFS
+            type = "filesystem";
+        }
+    });
+    
     ArduinoOTA.onEnd([]() { events.send("Update End", "ota"); });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
     {
@@ -264,7 +272,6 @@ void attemptConnection()
         else if(error == OTA_RECEIVE_ERROR) events.send("Recieve Failed", "ota");
         else if(error == OTA_END_ERROR) events.send("End Failed", "ota");
     });
-#endif
 
     ArduinoOTA.setHostname(hostName);
     ArduinoOTA.begin();
@@ -371,6 +378,7 @@ void attemptConnection()
     server.begin();
 #endif
 
+    Serial.print("IP: ");
     if (wifiMode == 1) Serial.println(WiFi.localIP());
     if (wifiMode == 0) Serial.println(WiFi.softAPIP());
 }
@@ -569,13 +577,20 @@ void loop()
 #endif                
                 for (int i = 0; i < retBytes; i++)
                 {
-                    telnetInputBuff[telnetInputBuffIdx++] = tcpBuffer[i];
-                    if (tcpBuffer[i] == '\n') //dump buffer at line breaks
+                    if (tcpBuffer[i] == (char)0xA5) //go into special firmware download mode
                     {
+                        loadTeensyFromTelnet();
+                    }
+                    else 
+                    {
+                        telnetInputBuff[telnetInputBuffIdx++] = tcpBuffer[i];
+                        if (tcpBuffer[i] == '\n') //dump buffer at line breaks
+                        {
 
-                        Serial.write('~');
-                        Serial.write(telnetInputBuff, telnetInputBuffIdx);
-                        telnetInputBuffIdx = 0;
+                            Serial.write('~');
+                            Serial.write(telnetInputBuff, telnetInputBuffIdx);
+                            telnetInputBuffIdx = 0;
+                        }
                     }
                 }
             }
@@ -627,6 +642,42 @@ void onOTAProgress(uint32_t progress, size_t fullSize)
         printf("\n");
         OTAcount = 0;
     }
+}
+
+bool loadTeensyFromTelnet()
+{
+    int contentLength = 0;
+    bool isValidContentType = false;
+
+    int numLines = 0;
+
+    Serial.write((char)0xA5); //signals to teensy that we're about to send an update
+    delay(250); //wait a little bit for the teensy side to be ready to receive
+    while (1)
+    {
+        String line = telnetClient.readStringUntil('\n');// read line till /n
+        telnetClient.write(0x97); //tell telnet sender that we received the last string so go ahead and send another
+        line.trim();// remove spaces
+        if (line.length() > 4) //don't send any blank lines in case they appear
+        {
+            //wait for a 0x97 byte before sending the line
+            while (Serial.read() != 0x97);
+            Serial.println(line); //send line verbatim to teensy side
+            numLines++;
+            if (numLines > 2000)
+            {
+                //sendTelnetLine("Still streaming update");
+                numLines = 0;
+            }
+            if (line.startsWith(":000000"))
+            {
+                sendTelnetLine("Update has finished streaming");
+                return true;
+                break;
+            }
+        }
+    }
+    return false;
 }
 
 //see the below loadOTAFile version for the comments about how this all works
@@ -697,6 +748,7 @@ bool loadTeensyFile(String filename)
     }
 
     //Serial.println("File length: " + String(contentLength) + ", Valid Content Type flag:" + String(isValidContentType));
+    int numLines = 0;
 
     // check contentLength and content type
     if (contentLength && isValidContentType) // Check if there is enough to OTA Update
@@ -716,6 +768,17 @@ bool loadTeensyFile(String filename)
                 //wait for a 0x97 byte before sending the line
                 while (Serial.read() != 0x97);
                 Serial.println(line); //don't send any blank lines in case they appear
+                numLines++;
+                if (numLines > 2000)
+                {
+                    sendTelnetLine("Still streaming update");
+                    numLines = 0;
+                }
+                if (line.startsWith(":0000"))
+                {
+                    sendTelnetLine("Update has finished streaming");
+                    break;
+                }
             }
         } //end if can begin
     } //End contentLength && isValidContentType
