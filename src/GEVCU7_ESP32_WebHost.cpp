@@ -7,6 +7,9 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include "esp_task_wdt.h"
+#include <map>
+#include <mutex>
+#include <vector>
 
 //causes several lines of text to get sent to GEVCU7 to give more feedback about what is going on.
 //#define EXTRA_DEBUG
@@ -23,6 +26,16 @@
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 AsyncEventSource events("/events");
+
+//Last known value of every StatusEntry GEVCU7 has reported. GEVCU7 only sends changes so this lets a newly
+//opened page show everything right away. Only touched from loop().
+std::map<String, String> statusCache;
+
+//The websocket handler runs in the AsyncTCP task, not loop(). It never writes Serial itself (that would
+//interleave with loop's writes) but queues work here for loop() to do.
+std::mutex wsQueueMutex;
+std::vector<String> wsRequests;     //JSON requests from browsers to forward to GEVCU7
+std::vector<uint32_t> wsNewClients; //newly connected clients that need the status cache
 #endif
 
 #ifdef TELNET
@@ -122,104 +135,86 @@ void sendTelnetBytes(const char *data, int length)
 #endif
 
 #ifdef WEBINTERFACE
-void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len){
-    if(type == WS_EVT_CONNECT)
+void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len)
+{
+    //Don't print anything to Serial in here. Serial is the link to GEVCU7.
+    if (type == WS_EVT_CONNECT)
     {
-        Serial.printf("ws[%s][%u] connect\n", server->url(), client->id());
-        //client->printf("Hello Client %u :)", client->id());
-        //client->ping();
+        std::lock_guard<std::mutex> lock(wsQueueMutex);
+        wsNewClients.push_back(client->id());
     }
-    else if(type == WS_EVT_DISCONNECT)
+    else if (type == WS_EVT_DATA)
     {
-        Serial.printf("ws[%s][%u] disconnect\n", server->url(), client->id());
-    } 
-    else if(type == WS_EVT_ERROR)
-    {
-        Serial.printf("ws[%s][%u] error(%u): %s\n", server->url(), client->id(), *((uint16_t*)arg), (char*)data);
-    } 
-    //else if(type == WS_EVT_PONG)
-    //{
-    //    Serial.printf("ws[%s][%u] pong[%u]: %s\n", server->url(), client->id(), len, (len)?(char*)data:"");
-    //    client->text("PONG BRO!");
-    //}
-    else if(type == WS_EVT_DATA)
-    {
-        /*
         AwsFrameInfo * info = (AwsFrameInfo*)arg;
-        String msg = "";
-        if(info->final && info->index == 0 && info->len == len)
+        //requests are small so only accept complete single frame text messages
+        if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT && len < 300)
         {
-            //the whole message is in a single frame and we got all of it's data
-            Serial.printf("ws[%s][%u] %s-message[%llu]: ", server->url(), client->id(), (info->opcode == WS_TEXT)?"text":"binary", info->len);
-
-            if(info->opcode == WS_TEXT)
-            {
-                for(size_t i=0; i < info->len; i++)
-                {
-                    msg += (char) data[i];
-                }
-            }
-            else
-            {
-                char buff[3];
-                for(size_t i=0; i < info->len; i++)
-                {
-                    sprintf(buff, "%02x ", (uint8_t) data[i]);
-                    msg += buff ;
-                }
-            }
-            Serial.printf("%s\n",msg.c_str());
-
-            if(info->opcode == WS_TEXT)
-                client->text("I got your text message");
-            else
-                client->binary("I got your binary message");
+            String msg;
+            msg.concat((const char *)data, len);
+            std::lock_guard<std::mutex> lock(wsQueueMutex);
+            if (wsRequests.size() < 16) wsRequests.push_back(msg);
         }
-        else
-        {
-            //message is comprised of multiple frames or the frame is split into multiple packets
-            if(info->index == 0)
-            {
-                if(info->num == 0)
-                    Serial.printf("ws[%s][%u] %s-message start\n", server->url(), client->id(), (info->message_opcode == WS_TEXT)?"text":"binary");
-                Serial.printf("ws[%s][%u] frame[%u] start[%llu]\n", server->url(), client->id(), info->num, info->len);
-            }
-
-            Serial.printf("ws[%s][%u] frame[%u] %s[%llu - %llu]: ", server->url(), client->id(), info->num, (info->message_opcode == WS_TEXT)?"text":"binary", info->index, info->index + len);
-
-            if(info->opcode == WS_TEXT)
-            {
-                for(size_t i=0; i < len; i++)
-                {
-                    msg += (char) data[i];
-                }
-            }
-            else
-            {
-                char buff[3];
-                for(size_t i=0; i < len; i++)
-                {
-                    sprintf(buff, "%02x ", (uint8_t) data[i]);
-                    msg += buff ;
-                }
-            }
-            Serial.printf("%s\n",msg.c_str());
-
-            if((info->index + len) == info->len)
-            {
-                Serial.printf("ws[%s][%u] frame[%u] end[%llu]\n", server->url(), client->id(), info->num, info->len);
-                if(info->final)
-                {
-                    Serial.printf("ws[%s][%u] %s-message end\n", server->url(), client->id(), (info->message_opcode == WS_TEXT)?"text":"binary");
-                    if(info->message_opcode == WS_TEXT)
-                        client->text("I got your text message");
-                    else
-                        client->binary("I got your binary message");
-                }
-            }
-        }*/
-
     }
+}
+
+//send every cached status value to one client as {"Status":{...}}
+void sendStatusCache(uint32_t clientId)
+{
+    DynamicJsonDocument doc(JSON_OBJECT_SIZE(statusCache.size()) + JSON_OBJECT_SIZE(1) + 64);
+    JsonObject obj = doc.createNestedObject("Status");
+    //const char * is stored by pointer, not copied. Fine as the cache can't change until we return
+    for (auto &kv : statusCache) obj[kv.first.c_str()] = kv.second.c_str();
+    String out;
+    serializeJson(doc, out);
+    ws.text(clientId, out);
+}
+
+//Only pass along the requests GEVCU7 understands. Re-serializing also guarantees a single line.
+void forwardRequestToGEVCU(const String &msg)
+{
+    StaticJsonDocument<512> doc;
+    if (deserializeJson(doc, msg)) return;
+    if (!doc.is<JsonObject>()) return;
+    if (doc.containsKey("GetDevices") || doc.containsKey("GetDevConfig") || doc.containsKey("GetStatusList")
+     || doc.containsKey("GetStatus") || (doc.containsKey("DeviceID") && doc.containsKey("CfgName")))
+    {
+        serializeJson(doc, Serial);
+        Serial.println();
+    }
+}
+
+//handle work the websocket handler queued up
+void processWebSocketQueue()
+{
+    std::vector<String> requests;
+    std::vector<uint32_t> clients;
+    {
+        std::lock_guard<std::mutex> lock(wsQueueMutex);
+        requests.swap(wsRequests);
+        clients.swap(wsNewClients);
+    }
+    for (uint32_t id : clients) sendStatusCache(id);
+    for (const String &msg : requests) forwardRequestToGEVCU(msg);
+}
+
+//JSON line from GEVCU7 that isn't a command for us. Replies to page requests are passed straight
+//through. Anything else is a status update which is cached and passed on wrapped as {"Status":...}
+void handleGEVCUJson(const String &line)
+{
+    if (line.startsWith("{\"DeviceList\"") || line.startsWith("{\"DevConfig\"")
+     || line.startsWith("{\"CfgResult\"") || line.startsWith("{\"StatusList\""))
+    {
+        ws.textAll(line);
+        return;
+    }
+
+    DynamicJsonDocument doc(line.length() * 2 + 1024);
+    if (deserializeJson(doc, line)) return;
+    for (JsonPair kv : doc.as<JsonObject>())
+    {
+        statusCache[kv.key().c_str()] = kv.value().as<String>();
+    }
+    if (ws.count() > 0) ws.textAll("{\"Status\":" + line + "}");
 }
 #endif
 
@@ -256,6 +251,7 @@ void attemptConnection()
         }
     });
     
+#ifdef WEBINTERFACE
     ArduinoOTA.onEnd([]() { events.send("Update End", "ota"); });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
     {
@@ -272,6 +268,7 @@ void attemptConnection()
         else if(error == OTA_RECEIVE_ERROR) events.send("Recieve Failed", "ota");
         else if(error == OTA_END_ERROR) events.send("End Failed", "ota");
     });
+#endif
 
     ArduinoOTA.setHostname(hostName);
     ArduinoOTA.begin();
@@ -305,76 +302,9 @@ void attemptConnection()
 
     server.onNotFound([](AsyncWebServerRequest *request)
     {
-        Serial.printf("NOT_FOUND: ");
-        if(request->method() == HTTP_GET)
-            Serial.printf("GET");
-        else if(request->method() == HTTP_POST)
-            Serial.printf("POST");
-        else if(request->method() == HTTP_DELETE)
-            Serial.printf("DELETE");
-        else if(request->method() == HTTP_PUT)
-            Serial.printf("PUT");
-        else if(request->method() == HTTP_PATCH)
-            Serial.printf("PATCH");
-        else if(request->method() == HTTP_HEAD)
-            Serial.printf("HEAD");
-        else if(request->method() == HTTP_OPTIONS)
-            Serial.printf("OPTIONS");
-        else
-            Serial.printf("UNKNOWN");
-        Serial.printf(" http://%s%s\n", request->host().c_str(), request->url().c_str());
-
-        if(request->contentLength())
-        {
-            Serial.printf("_CONTENT_TYPE: %s\n", request->contentType().c_str());
-            Serial.printf("_CONTENT_LENGTH: %u\n", request->contentLength());
-        }
-
-        int headers = request->headers();
-        int i;
-        for(i=0;i<headers;i++)
-        {
-            AsyncWebHeader* h = (AsyncWebHeader *)request->getHeader(i);
-            Serial.printf("_HEADER[%s]: %s\n", h->name().c_str(), h->value().c_str());
-        }
-
-        int params = request->params();
-        for(i=0;i<params;i++)
-        {
-            AsyncWebParameter* p = (AsyncWebParameter *)request->getParam(i);
-            if(p->isFile())
-            {
-                Serial.printf("_FILE[%s]: %s, size: %u\n", p->name().c_str(), p->value().c_str(), p->size());
-            } 
-            else if(p->isPost())
-            {
-                Serial.printf("_POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
-            } 
-            else 
-            {
-                Serial.printf("_GET[%s]: %s\n", p->name().c_str(), p->value().c_str());
-            }
-        }
         request->send(404);
     });
 
-    server.onFileUpload([](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
-    {
-        if(!index)
-            Serial.printf("UploadStart: %s\n", filename.c_str());
-        Serial.printf("%s", (const char*)data);
-        if(final)
-            Serial.printf("UploadEnd: %s (%u)\n", filename.c_str(), index+len);
-    });
-
-    server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-    {
-        if(!index)
-            Serial.printf("BodyStart: %u\n", total);
-        Serial.printf("%s", (const char*)data);
-        if(index + len == total)
-            Serial.printf("BodyEnd: %u\n", total);
-    });
     server.begin();
 #endif
 
@@ -385,7 +315,7 @@ void attemptConnection()
 
 void setup()
 {
-    Serial.setRxBufferSize(1024);
+    Serial.setRxBufferSize(8192); //status and config JSON from GEVCU7 can be several KB per line
     Serial.setTxBufferSize(1024);
     Serial.begin(230400);
     delay(2000);
@@ -403,6 +333,7 @@ void setup()
     statusInputBuffIdx = 0;
     memset(telnetInputBuff, 0, 1000);
 #endif
+    lineBuffer.reserve(2048);
     //attemptConnection();
 
     Serial.println("About to start LittleFS");
@@ -449,6 +380,7 @@ void loop()
 
 #ifdef WEBINTERFACE    
     ws.cleanupClients();
+    processWebSocketQueue();
 #endif
     while (Serial.available())
     {
@@ -458,43 +390,52 @@ void loop()
             //handle input here
             if (lineBuffer[0] == '{')
             {
-                StaticJsonDocument<5000>doc;
-                DeserializationError err = deserializeJson(doc, lineBuffer.c_str());
-                if (err)
+                //commands for this module are small and come first. Check for them before parsing anything big
+                if (lineBuffer.startsWith("{\"SSID\"") || lineBuffer.startsWith("{\"FWUPD\"") || lineBuffer.startsWith("{\"ESPUPD\""))
                 {
-                    Serial.print(F("deserializeJson() failed with code "));
-                    Serial.println(err.f_str());
+                    StaticJsonDocument<1024>doc;
+                    DeserializationError err = deserializeJson(doc, lineBuffer.c_str());
+                    if (err)
+                    {
+                        Serial.print(F("deserializeJson() failed with code "));
+                        Serial.println(err.f_str());
+                    }
+                    else
+                    {
+                        JsonObject obj = doc.as<JsonObject>();
+                        if (obj.containsKey("SSID"))
+                        {
+                            strlcpy(ssid, doc["SSID"] | "GEVCU7", 64);
+                            strlcpy(password, doc["WIFIPW"] | "Default123", 64);
+                            strlcpy(hostName, doc["HostName"] | "gevcu7", 64);
+                            wifiMode = doc["WiFiMode"];
+                            attemptConnection();
+                        }
+                        else if (obj.containsKey("FWUPD"))
+                        {
+                            String filename = doc["FWUPD"];
+                            if (filename.length() < 2) filename = "GEVCU7";
+                            loadTeensyFile(filename);
+                        }
+                        else if (obj.containsKey("ESPUPD"))
+                        {
+                            int updateType = doc["ESPUPD"];                        
+                            execOTA(updateType);
+                        }
+                    }
                 }
-                else
-                {
-                    JsonObject obj = doc.as<JsonObject>();
-                    if (obj.containsKey("SSID"))
-                    {
-                        strlcpy(ssid, doc["SSID"] | "GEVCU7", 64);
-                        strlcpy(password, doc["WIFIPW"] | "Default123", 64);
-                        strlcpy(hostName, doc["HostName"] | "gevcu7", 64);
-                        wifiMode = doc["WiFiMode"];
-                        attemptConnection();
-                    }
-                    else if (obj.containsKey("FWUPD"))
-                    {
-                        String filename = doc["FWUPD"];
-                        if (filename.length() < 2) filename = "GEVCU7";
-                        loadTeensyFile(filename);
-                    }
-                    else if (obj.containsKey("ESPUPD"))
-                    {
-                        int updateType = doc["ESPUPD"];                        
-                        execOTA(updateType);
-                    }
-                }
+#ifdef WEBINTERFACE
+                else handleGEVCUJson(lineBuffer);
+#endif
             }
             if (lineBuffer[0] == '~')
             {
                 //lineBuffer += "\n"; //make sure to send the line ending too.
                 lineBuffer[0] = ' ';
 #ifdef TELNET
-                telnetOutBuffLength += sprintf(&telnetOutBuff[telnetOutBuffLength], "%s\n", lineBuffer.c_str());
+                //only add to telnet out buffer if there is room. Otherwise discard
+                if (telnetOutBuffLength + lineBuffer.length() + 2 < 1200)
+                    telnetOutBuffLength += sprintf(&telnetOutBuff[telnetOutBuffLength], "%s\n", lineBuffer.c_str());
                 //Serial.println(telnetOutBuffLength);
                 //sendTelnetLine(lineBuffer.c_str());
 #endif
@@ -505,20 +446,18 @@ void loop()
                 //lineBuffer += "\n"; //make sure to send the line ending too.
                 lineBuffer[0] = ' ';
 #ifdef TELNET
-                //telnetOutBuffLength += sprintf(&telnetOutBuff[telnetOutBuffLength], "%s\n", lineBuffer.c_str());
-                //Serial.println(telnetOutBuffLength);
                 printStatusToNetwork(lineBuffer);
 #endif
             }
 
             lineBuffer = "";
         }
-        else lineBuffer += c;
+        else if (lineBuffer.length() < 16384) lineBuffer += c; //runaway line protection
     }
 #ifdef TELNET    
     //if telnet buffer is getting full or 300ms has gone by then flush the buffer
     if ( 
-        (telnetOutBuffLength > 1000) 
+        (telnetOutBuffLength > 950) 
      || ( ((millis() - 300) > telnetOutLastWrite)  && (telnetOutBuffLength > 0) ) 
        )
     {
@@ -571,7 +510,7 @@ void loop()
         {
             while (telnetClient.available() > 0)
             {
-                int retBytes = telnetClient.read((uint8_t *)tcpBuffer, 1500);
+                int retBytes = telnetClient.read((uint8_t *)tcpBuffer, 1495);
 #ifdef EXTRA_DEBUG
                 Serial.printf("Got %i from telnet client\n", retBytes);
 #endif                

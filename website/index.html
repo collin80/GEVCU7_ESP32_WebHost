@@ -1,30 +1,438 @@
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-	<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-	<title>GEVCU Dashboard</title>
-	<link rel="stylesheet" type="text/css" href="styles/main.css" />
-	<link rel="stylesheet" type="text/css" href="styles/alertify.css" />
-	<script type='text/javascript' src='util/alertify.js'></script>
-	<script type='text/javascript' src='util/common.js'></script>
-	<script type="text/javascript" src="util/gauge.js"></script>
-	<script type="text/javascript" src="gauges.js"></script>
-	<script type='text/javascript' src='dashboard.js'></script>
-	<script type='text/javascript' src='util/annunciator.js'></script>
-	<script type='text/javascript' src='util/battery.js'></script>
-	<script>
-		function init() {
-			alertify.set('notifier', 'position', 'top-right');
-			loadPage("dashboard");
-			showTab('dashboard');
-		}
-	</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GEVCU7</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --panel2: #eef0f3; --text: #1b1f24; --muted: #5d6673;
+  --line: #d9dde3; --accent: #0b72d9; --ok: #1a8a3c; --warn: #b26a00; --err: #c62828;
+  --flash: rgba(11,114,217,.18);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111418; --panel: #1a1e24; --panel2: #232830; --text: #e4e7eb; --muted: #8d96a3;
+    --line: #2e343d; --accent: #4ea1ff; --ok: #4cc26e; --warn: #f0a83a; --err: #ff6b6b;
+    --flash: rgba(78,161,255,.22);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111418; --panel: #1a1e24; --panel2: #232830; --text: #e4e7eb; --muted: #8d96a3;
+  --line: #2e343d; --accent: #4ea1ff; --ok: #4cc26e; --warn: #f0a83a; --err: #ff6b6b;
+  --flash: rgba(78,161,255,.22);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 16px; padding: 10px 16px; flex-wrap: wrap; }
+header h1 { font-size: 18px; margin: 0; letter-spacing: .5px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--err); }
+.dot.on { background: var(--ok); }
+.meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+nav { display: flex; gap: 4px; margin-left: auto; }
+nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+nav button.active { color: var(--text); background: var(--panel2); border-color: var(--line); }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+.toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+input[type=search], input[type=text], select { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; font: inherit; min-width: 0; }
+input[type=search] { flex: 1 1 220px; max-width: 360px; }
+button.btn { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+button.btn.ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
+button.btn:disabled { opacity: .5; cursor: default; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.card h2 { font-size: 13px; margin: 0; padding: 8px 12px; background: var(--panel2); border-bottom: 1px solid var(--line);
+  display: flex; justify-content: space-between; }
+.card h2 span { color: var(--muted); font-weight: normal; }
+.srow { display: flex; justify-content: space-between; gap: 12px; padding: 4px 12px; border-bottom: 1px solid var(--line); transition: background .6s; }
+.srow:last-child { border-bottom: 0; }
+.srow .v { font-variant-numeric: tabular-nums; font-family: ui-monospace, Menlo, Consolas, monospace; text-align: right; overflow-wrap: anywhere; }
+.srow.flash { background: var(--flash); transition: none; }
+.layout { display: grid; grid-template-columns: 240px 1fr; gap: 16px; align-items: start; }
+.devlist { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: sticky; top: 64px; }
+.devlist .opt { display: block; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.devlist button { display: block; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--line);
+  padding: 8px 12px; color: var(--text); font: inherit; cursor: pointer; }
+.devlist button:last-child { border-bottom: 0; }
+.devlist button.active { background: var(--panel2); box-shadow: inset 3px 0 var(--accent); }
+.devlist button.disabled { color: var(--muted); }
+.devlist small { display: block; color: var(--muted); font-size: 11px; }
+#devSelect { display: none; width: 100%; margin-bottom: 12px; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { background: var(--panel2); font-size: 12px; color: var(--muted); font-weight: 600; }
+td.name { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; white-space: nowrap; }
+td .help { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: normal; font-family: system-ui, sans-serif; }
+td.cur { font-family: ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+td.cur .desc { display: block; color: var(--muted); font-size: 12px; font-family: system-ui, sans-serif; }
+td.edit { white-space: nowrap; }
+td.edit input { width: 140px; }
+td.edit .range { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+td.edit .err { display: block; color: var(--err); font-size: 11px; margin-top: 3px; }
+.empty { color: var(--muted); padding: 24px; text-align: center; background: var(--panel); border: 1px dashed var(--line); border-radius: 8px; }
+#toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 10; max-width: calc(100vw - 32px); }
+.toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--ok); padding: 8px 12px; border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.2); }
+.toast.bad { border-left-color: var(--err); }
+.hidden { display: none !important; }
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; }
+  .devlist { display: none; }
+  #devSelect { display: block; }
+  thead { display: none; }
+  table, tbody, tr, td { display: block; width: 100%; }
+  tr { border-bottom: 1px solid var(--line); }
+  td { border: 0; padding: 4px 10px; }
+  td.name { padding-top: 10px; white-space: normal; }
+  td.edit { padding-bottom: 10px; }
+  td.edit input { width: calc(100% - 70px); }
+  nav { margin-left: 0; }
+}
+</style>
 </head>
-<body onload="init()">
-	<div id="tabHeader"/>
-	<div id="tabs" style="overflow: hidden;">
-		<div class="tab" id="dashboard"></div>
-	</div>
-	<div class="settings"><a href="settings.htm"><img alt="settings" width="30em" height="30em" src="pics/settings.png"></a></div>
-	<!-- img src="pics/car.svg" width="90%" style="position: absolute; top: 20%; left: 5%	; z-index: -1; opacity: 0.1;"/--> 
+<body>
+<header>
+  <h1>GEVCU7</h1>
+  <span class="pill"><span class="dot" id="connDot"></span><span id="connText">Disconnected</span></span>
+  <span class="meta" id="uptime"></span>
+  <nav>
+    <button data-tab="status" class="active">Status</button>
+    <button data-tab="config">Configuration</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-status">
+    <div class="toolbar">
+      <input type="search" id="statusFilter" placeholder="Filter status values">
+      <span class="meta" id="statusCount"></span>
+      <button class="btn ghost" id="statusRefresh">Refresh all</button>
+    </div>
+    <div class="grid" id="statusGrid"></div>
+    <div class="empty" id="statusEmpty">Waiting for status data from GEVCU7…</div>
+  </section>
+
+  <section id="tab-config" class="hidden">
+    <div class="layout">
+      <div class="devlist" id="devList"></div>
+      <div>
+        <select id="devSelect"></select>
+        <div class="toolbar">
+          <input type="search" id="cfgFilter" placeholder="Filter parameters">
+          <button class="btn ghost" id="cfgReload">Reload</button>
+        </div>
+        <div id="cfgBody"><div class="empty">Choose a device to see its parameters.</div></div>
+      </div>
+    </div>
+  </section>
+</main>
+<div id="toasts"></div>
+
+<script>
+'use strict';
+// ---- state ----
+let ws = null, retryDelay = 1000;
+const statusValues = {};      // name -> value string
+let statusGroups = null;      // device short name -> [status names], from StatusList
+const statusRows = {};        // name -> {row, valEl}
+let devices = {};             // short name -> {DeviceID, DeviceName, DeviceEnabled, DeviceType}
+let showDisabled = false;
+let currentDev = null;        // short name of selected device
+let currentCfg = null;        // {DevID, entries:{name: entry}}
+const pendingSets = {};       // CfgName -> true while waiting for CfgResult
+const cfgErrors = {};         // CfgName -> validation message, kept across re-renders
+
+const $ = id => document.getElementById(id);
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function toast(msg, bad) {
+  const t = el('div', 'toast' + (bad ? ' bad' : ''), msg);
+  $('toasts').appendChild(t);
+  setTimeout(() => t.remove(), bad ? 6000 : 3000);
+}
+
+// ---- websocket ----
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(obj)); return true; }
+  toast('Not connected to GEVCU7', true);
+  return false;
+}
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => {
+    retryDelay = 1000;
+    $('connDot').classList.add('on');
+    $('connText').textContent = 'Connected';
+    send({GetStatusList: 1});
+    send({GetDevices: 1});
+    if (currentCfg) send({GetDevConfig: currentCfg.DevID});
+  };
+  ws.onclose = () => {
+    $('connDot').classList.remove('on');
+    $('connText').textContent = 'Disconnected, retrying…';
+    setTimeout(connect, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 10000);
+  };
+  ws.onmessage = ev => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.Status) onStatus(msg.Status);
+    if (msg.StatusList) onStatusList(msg.StatusList);
+    if (msg.DeviceList) onDeviceList(msg.DeviceList);
+    if (msg.DevConfig) onDevConfig(msg.DevConfig);
+    if (msg.CfgResult) onCfgResult(msg.CfgResult);
+  };
+}
+
+// ---- status ----
+const SYSTEM_KEYS = ['timeRunning', 'systemState'];
+function onStatus(obj) {
+  let newName = false;
+  for (const k in obj) {
+    const v = String(obj[k]);
+    if (!(k in statusValues)) newName = true;
+    const changed = statusValues[k] !== v;
+    statusValues[k] = v;
+    if (k === 'timeRunning') $('uptime').textContent = 'Up ' + v;
+    const r = statusRows[k];
+    if (r && changed) {
+      r.valEl.textContent = v;
+      r.row.classList.add('flash');
+      setTimeout(() => r.row.classList.remove('flash'), 80);
+    }
+  }
+  if (newName) renderStatus();
+}
+function onStatusList(list) {
+  statusGroups = list;
+  renderStatus();
+}
+function renderStatus() {
+  const grid = $('statusGrid');
+  grid.replaceChildren();
+  for (const k in statusRows) delete statusRows[k];
+  const filter = $('statusFilter').value.trim().toLowerCase();
+  const groups = [];
+  const grouped = new Set();
+  if (statusGroups) {
+    for (const dev of Object.keys(statusGroups).sort()) {
+      groups.push([dev, statusGroups[dev]]);
+      statusGroups[dev].forEach(n => grouped.add(n));
+    }
+  }
+  const other = Object.keys(statusValues).filter(n => !grouped.has(n)).sort();
+  if (other.length) groups.push([statusGroups ? 'System' : 'All values', other]);
+
+  let shown = 0;
+  for (const [dev, names] of groups) {
+    const match = names.filter(n => !filter || n.toLowerCase().includes(filter) || dev.toLowerCase().includes(filter));
+    if (!match.length) continue;
+    const card = el('div', 'card');
+    const h = el('h2', null, dev);
+    h.appendChild(el('span', null, match.length));
+    card.appendChild(h);
+    for (const n of match) {
+      const row = el('div', 'srow');
+      row.appendChild(el('span', null, n));
+      const v = el('span', 'v', n in statusValues ? statusValues[n] : '—');
+      row.appendChild(v);
+      card.appendChild(row);
+      statusRows[n] = {row, valEl: v};
+      shown++;
+    }
+    grid.appendChild(card);
+  }
+  $('statusEmpty').classList.toggle('hidden', shown > 0);
+  $('statusCount').textContent = shown ? shown + ' values' : '';
+}
+
+// ---- devices ----
+function onDeviceList(list) {
+  devices = list;
+  renderDeviceList();
+}
+function deviceNames() {
+  return Object.keys(devices)
+    .filter(n => showDisabled || devices[n].DeviceEnabled)
+    .sort((a, b) => (devices[b].DeviceEnabled - devices[a].DeviceEnabled) || devices[a].DeviceName.localeCompare(devices[b].DeviceName));
+}
+function renderDeviceList() {
+  const list = $('devList'), sel = $('devSelect');
+  list.replaceChildren();
+  sel.replaceChildren();
+  const opt = el('label', 'opt');
+  const cb = el('input');
+  cb.type = 'checkbox';
+  cb.checked = showDisabled;
+  cb.onchange = () => { showDisabled = cb.checked; renderDeviceList(); };
+  opt.append(cb, ' Show disabled devices');
+  list.appendChild(opt);
+  sel.appendChild(new Option('Choose a device…', ''));
+  for (const n of deviceNames()) {
+    const d = devices[n];
+    const b = el('button', d.DeviceEnabled ? '' : 'disabled', d.DeviceName);
+    b.appendChild(el('small', null, n + ' · 0x' + d.DeviceID.toString(16).toUpperCase() + ' · ' + d.DeviceType + (d.DeviceEnabled ? '' : ' · disabled')));
+    if (n === currentDev) b.classList.add('active');
+    b.onclick = () => selectDevice(n);
+    list.appendChild(b);
+    sel.appendChild(new Option(d.DeviceName + (d.DeviceEnabled ? '' : ' (disabled)'), n, false, n === currentDev));
+  }
+}
+function selectDevice(n) {
+  currentDev = n;
+  currentCfg = null;
+  for (const k in cfgErrors) delete cfgErrors[k];
+  renderDeviceList();
+  if (!devices[n].DeviceEnabled) {
+    $('cfgBody').replaceChildren(el('div', 'empty', devices[n].DeviceName + ' is disabled. Disabled devices don’t register their parameters. Enable it from the serial console (ENABLE=0x' + devices[n].DeviceID.toString(16).toUpperCase() + ') and reboot.'));
+    return;
+  }
+  $('cfgBody').replaceChildren(el('div', 'empty', 'Loading parameters…'));
+  send({GetDevConfig: devices[n].DeviceID});
+}
+
+// ---- config values ----
+// Valu is the raw stored value. Precision: FLOAT = decimal places. Integers: 16 = hex,
+// negative N = stored / |N|, positive N = stored * N. Min/MaxValue are already display units.
+const INT_TYPES = ['BYTE', 'INT16', 'UINT16', 'INT32', 'UINT32'];
+function fmtInt(v, p) { return p === 16 ? '0x' + (v >>> 0).toString(16).toUpperCase() : String(v); }
+function displayValue(e) {
+  const v = e.Valu, p = e.Precision;
+  if (e.ValType === 'STR') return String(v);
+  if (e.ValType === 'FLOAT') return Number(v).toFixed(Math.max(0, Math.min(p, 10)));
+  if (p < 0) return fmtInt(Math.trunc(v / -p), p);  // console uses integer division too
+  if (p > 0 && p !== 16) return fmtInt(v * p, p);
+  return fmtInt(v, p);
+}
+function rangeText(e) {
+  if (e.ValType === 'STR') return '';
+  if (e.ValType === 'FLOAT') return e.MinValue + ' to ' + e.MaxValue;
+  return fmtInt(e.MinValue, e.Precision) + ' to ' + fmtInt(e.MaxValue, e.Precision);
+}
+// returns [textToSend, null] or [null, errorMessage]
+function validate(e, raw) {
+  const s = raw.trim();
+  if (e.ValType === 'STR') {
+    if (raw.length > 200) return [null, 'Too long'];
+    return [raw, null];
+  }
+  if (s === '') return [null, 'Enter a value'];
+  let n;
+  if (e.ValType === 'FLOAT') {
+    n = Number(s);
+    if (!isFinite(n)) return [null, 'Not a number'];
+  } else {
+    n = Number(s);   // accepts 0x hex
+    if (!Number.isInteger(n)) return [null, 'Must be a whole number'];
+  }
+  if (n < e.MinValue) return [null, 'Below minimum ' + rangeText(e).split(' to ')[0]];
+  if (n > e.MaxValue) return [null, 'Above maximum ' + rangeText(e).split(' to ')[1]];
+  // send plain decimal so GEVCU's strtol never reads a leading 0 as octal
+  return [String(n), null];
+}
+function onDevConfig(obj) {
+  const short = Object.keys(obj)[0];
+  if (!short) return;
+  const d = obj[short];
+  if (short !== currentDev) return;   // reply for a device we've navigated away from
+  const entries = {};
+  for (const k in d) if (k !== 'DevID') entries[k] = d[k];
+  currentCfg = {DevID: d.DevID, entries};
+  renderConfig();
+}
+function renderConfig() {
+  const body = $('cfgBody');
+  if (!currentCfg) return;
+  const names = Object.keys(currentCfg.entries);
+  if (!names.length) { body.replaceChildren(el('div', 'empty', 'This device has no configurable parameters.')); return; }
+  // keep anything the user has typed but not yet sent
+  const typed = {};
+  body.querySelectorAll('input[data-name]').forEach(i => { if (i.value !== i.defaultValue) typed[i.dataset.name] = i.value; });
+  const filter = $('cfgFilter').value.trim().toLowerCase();
+  const table = el('table');
+  const thead = el('thead'), hr = el('tr');
+  ['Parameter', 'Current value', 'New value'].forEach(t => hr.appendChild(el('th', null, t)));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tb = el('tbody');
+  for (const n of names) {
+    const e = currentCfg.entries[n];
+    if (filter && !n.toLowerCase().includes(filter) && !(e.HelpTxt || '').toLowerCase().includes(filter)) continue;
+    const tr = el('tr');
+    const tdName = el('td', 'name', n);
+    tdName.appendChild(el('div', 'help', e.HelpTxt || ''));
+    const tdCur = el('td', 'cur', displayValue(e));
+    if (e.Desc) tdCur.appendChild(el('span', 'desc', e.Desc));
+    const tdEdit = el('td', 'edit');
+    const inp = el('input');
+    inp.type = 'text';
+    inp.dataset.name = n;
+    inp.defaultValue = displayValue(e);
+    inp.value = n in typed ? typed[n] : inp.defaultValue;
+    inp.autocomplete = 'off';
+    inp.spellcheck = false;
+    const btn = el('button', 'btn', pendingSets[n] ? '…' : 'Set');
+    btn.disabled = !!pendingSets[n];
+    const hint = el('span', 'range', rangeText(e));
+    const err = el('span', 'err' + (cfgErrors[n] ? '' : ' hidden'), cfgErrors[n] || '');
+    const submit = () => {
+      const [val, msg] = validate(e, inp.value);
+      if (msg) cfgErrors[n] = msg; else delete cfgErrors[n];
+      err.classList.toggle('hidden', !msg);
+      err.textContent = msg || '';
+      if (msg) return;
+      if (send({DeviceID: currentCfg.DevID, CfgName: n, Valu: val})) {
+        pendingSets[n] = true;
+        btn.disabled = true;
+        btn.textContent = '…';
+        setTimeout(() => { if (pendingSets[n]) { delete pendingSets[n]; toast('No reply from GEVCU7 for ' + n, true); renderConfig(); } }, 5000);
+      }
+    };
+    btn.onclick = submit;
+    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); };
+    inp.oninput = () => { delete cfgErrors[n]; err.classList.add('hidden'); };
+    tdEdit.append(inp, ' ', btn, hint, err);
+    tr.append(tdName, tdCur, tdEdit);
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb);
+  body.replaceChildren(table);
+}
+function onCfgResult(r) {
+  delete pendingSets[r.CfgName];
+  const msgs = {0: 'Set ' + r.CfgName + ' to ' + r.Valu, 1: r.CfgName + ': value below minimum',
+                2: r.CfgName + ': value above maximum', 3: r.CfgName + ': no such device or setting'};
+  toast(msgs[r.Result] || (r.CfgName + ': unknown result'), r.Result !== 0);
+  // GEVCU7 follows a CfgResult with a fresh DevConfig which re-renders the table. Drop the typed
+  // value for this entry so the input shows what's actually stored.
+  const inp = document.querySelector('input[data-name="' + CSS.escape(r.CfgName) + '"]');
+  if (inp && r.Result === 0) inp.value = inp.defaultValue;
+  renderConfig();
+}
+
+// ---- ui wiring ----
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b));
+  $('tab-status').classList.toggle('hidden', b.dataset.tab !== 'status');
+  $('tab-config').classList.toggle('hidden', b.dataset.tab !== 'config');
+  try { localStorage.setItem('gevcuTab', b.dataset.tab); } catch (e) {}
+});
+$('statusFilter').oninput = renderStatus;
+$('statusRefresh').onclick = () => { send({GetStatusList: 1}); send({GetStatus: 1}); };
+$('cfgFilter').oninput = renderConfig;
+$('cfgReload').onclick = () => { send({GetDevices: 1}); if (currentDev && devices[currentDev]) selectDevice(currentDev); };
+$('devSelect').onchange = ev => { if (ev.target.value) selectDevice(ev.target.value); };
+try { const t = localStorage.getItem('gevcuTab'); if (t) document.querySelector('nav button[data-tab="' + t + '"]').click(); } catch (e) {}
+
+connect();
+</script>
 </body>
 </html>
