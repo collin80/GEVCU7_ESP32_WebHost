@@ -79,6 +79,17 @@ td.edit .err { display: block; color: var(--err); font-size: 11px; margin-top: 3
   box-shadow: 0 4px 14px rgba(0,0,0,.2); }
 .toast.bad { border-left-color: var(--err); }
 .hidden { display: none !important; }
+.tchart { margin-bottom: 12px; }
+.tchart .plot { position: relative; padding: 10px 12px 0; }
+.tchart svg { display: block; width: 100%; touch-action: none; }
+.tchart svg text { font: 11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--muted); }
+.tchart svg text.lbl { fill: var(--text); font-weight: 600; }
+.tchart .tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.15); font-variant-numeric: tabular-nums; }
+.tchart .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 6px 12px 10px; font-size: 12px; color: var(--muted); }
+.tchart .sw { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--accent); vertical-align: middle; margin-right: 5px; }
+.tchart .sw.saved { border-top: 2px dashed var(--muted); }
+.tchart .sw.dot { width: 9px; height: 9px; border: 0; border-radius: 50%; background: var(--warn); }
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; }
   .devlist { display: none; }
@@ -202,6 +213,7 @@ function onStatus(obj) {
     const changed = statusValues[k] !== v;
     statusValues[k] = v;
     if (k === 'timeRunning') $('uptime').textContent = 'Up ' + v;
+    if (changed && (k === 'Pedal_Position' || k === 'Raw_Throttle')) updateThrottleLive();
     const r = statusRows[k];
     if (r && changed) {
       r.valEl.textContent = v;
@@ -398,13 +410,198 @@ function renderConfig() {
     };
     btn.onclick = submit;
     inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); };
-    inp.oninput = () => { delete cfgErrors[n]; err.classList.add('hidden'); };
+    inp.oninput = () => { delete cfgErrors[n]; err.classList.add('hidden'); redrawThrottle(); };
     tdEdit.append(inp, ' ', btn, hint, err);
     tr.append(tdName, tdCur, tdEdit);
     tb.appendChild(tr);
   }
   table.appendChild(tb);
-  body.replaceChildren(table);
+  if (isThrottleCfg()) {
+    body.replaceChildren(throttleCard(), table);
+    drawThrottleChart();
+  } else body.replaceChildren(table);
+}
+
+// ---- throttle map chart ----
+// Mirrors Throttle::mapPedalPosition() in the GEVCU7 firmware. Pedal and output are permille,
+// map/regen positions are stored permille, regen/creep percentages are stored as plain percent.
+const THROTTLE_KEYS = ['TRNGMAX', 'TRNGMIN', 'TFWD', 'TMAP1IN', 'TMAP1OUT', 'TMAP2IN', 'TMAP2OUT',
+                       'TMAP3IN', 'TMAP3OUT', 'TMINRN', 'TMAXRN', 'TCREEP'];
+let throttleChart = null;     // {card, plot, svgWrap, tip, legend, c, x, y, live}
+function isThrottleCfg() { return !!currentCfg && THROTTLE_KEYS.every(k => k in currentCfg.entries); }
+function arduinoMap(x, inMin, inMax, outMin, outMax) {
+  if (inMax === inMin) return outMin;   // ARM integer divide by zero yields 0
+  return Math.trunc((x - inMin) * (outMax - outMin) / (inMax - inMin)) + outMin;
+}
+// display units -> stored value, inverse of displayValue()
+function toRaw(e, n) {
+  const p = e.Precision;
+  if (e.ValType === 'FLOAT' || p === 0 || p === 16) return n;
+  return p < 0 ? n * -p : n / p;
+}
+// stored params, optionally overridden by valid values typed into the table but not yet sent
+function throttleParams(useTyped) {
+  const c = {};
+  for (const k of THROTTLE_KEYS.concat('TSMOOTH', 'TSMOOTHCUT')) {
+    const e = currentCfg.entries[k];
+    if (!e) continue;
+    c[k] = Number(e.Valu);
+    if (!useTyped) continue;
+    const i = $('cfgBody').querySelector('input[data-name="' + k + '"]');
+    if (i && i.value !== i.defaultValue) {
+      const [v] = validate(e, i.value);
+      if (v !== null) c[k] = toRaw(e, Number(v));
+    }
+  }
+  return c;
+}
+function mapPedal(c, p) {
+  const m = [[c.TMAP1IN, c.TMAP1OUT], [c.TMAP2IN, c.TMAP2OUT], [c.TMAP3IN, c.TMAP3OUT]];
+  let t = 0;
+  if (p === 0 && c.TCREEP > 0) t = 10 * c.TCREEP;
+  else if (p <= c.TRNGMIN && p >= c.TRNGMAX) {
+    const range = c.TRNGMIN - c.TRNGMAX, value = p - c.TRNGMAX;
+    if (range !== 0) t = -10 * c.TMINRN + Math.trunc((c.TMAXRN - c.TMINRN) * (100 - Math.trunc(value * 100 / range)) / -10);
+  }
+  if (p >= c.TFWD) {
+    t = arduinoMap(p, c.TFWD, m[0][0], 0, m[0][1]);
+    if (p >= m[0][0] && m[1][0] > m[0][0]) t = arduinoMap(p, m[0][0], m[1][0], m[0][1], m[1][1]);
+    if (p >= m[1][0] && m[2][0] > m[1][0]) t = arduinoMap(p, m[1][0], m[2][0], m[1][1], m[2][1]);
+    if (p >= m[2][0] && m[2][0] < 1000) t = arduinoMap(p, m[2][0], 1000, m[2][1], 1000);
+  }
+  if (t < -1090 || t > 1090) return 0;   // firmware raises a fault and outputs 0
+  if (t > 979) t = 1000;
+  return t;
+}
+function svgEl(tag, attrs, text) {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+const pct = v => (v / 10).toFixed(1).replace(/\.0$/, '') + '%';
+function throttleCard() {
+  if (throttleChart) return throttleChart.card;
+  const card = el('div', 'card tchart');
+  const h = el('h2', null, 'Throttle map');
+  h.appendChild(el('span', null, 'pedal position → motor torque'));
+  const plot = el('div', 'plot'), svgWrap = el('div'), tip = el('div', 'tip hidden'), legend = el('div', 'legend');
+  plot.append(svgWrap, tip);
+  card.append(h, plot, legend);
+  throttleChart = {card, plot, svgWrap, tip, legend};
+  return card;
+}
+function redrawThrottle() { if (throttleChart && throttleChart.card.isConnected) drawThrottleChart(); }
+function drawThrottleChart() {
+  const tc = throttleChart;
+  const c = throttleParams(true), saved = throttleParams(false);
+  const preview = Object.keys(c).some(k => c[k] !== saved[k]);
+  const W = Math.max(280, (tc.plot.clientWidth || 640) - 24), H = W < 520 ? 230 : 290;
+  const ml = 46, mr = 14, mt = 18, mb = 36, pw = W - ml - mr, ph = H - mt - mb;
+  const x = p => ml + Math.max(0, Math.min(1000, p)) / 1000 * pw;
+  const y = t => mt + (1000 - t) / 2000 * ph;
+  Object.assign(tc, {c, x, y, ml, pw});
+  const svg = svgEl('svg', {width: W, height: H, viewBox: '0 0 ' + W + ' ' + H, role: 'img',
+    'aria-label': 'Throttle map: motor torque from -100% (regen) to 100% versus pedal position 0 to 100%'});
+
+  // zones
+  const zone = (a, b, color, label) => {
+    if (b <= a) return;
+    svg.appendChild(svgEl('rect', {x: x(a), y: mt, width: x(b) - x(a), height: ph, fill: color, 'fill-opacity': .09}));
+    if (x(b) - x(a) > 44) svg.appendChild(svgEl('text', {x: (x(a) + x(b)) / 2, y: mt - 5, 'text-anchor': 'middle'}, label));
+  };
+  zone(c.TRNGMAX, c.TRNGMIN, 'var(--ok)', 'Regen');
+  zone(c.TRNGMIN, c.TFWD, 'var(--muted)', 'Coast');
+  zone(c.TFWD, 1000, 'var(--accent)', 'Drive');
+
+  // grid + axes
+  for (const t of [-1000, -500, 0, 500, 1000]) {
+    svg.appendChild(svgEl('line', {x1: ml, x2: ml + pw, y1: y(t), y2: y(t), stroke: t ? 'var(--line)' : 'var(--muted)', 'stroke-width': 1}));
+    svg.appendChild(svgEl('text', {x: ml - 6, y: y(t) + 4, 'text-anchor': 'end'}, pct(t)));
+  }
+  for (const p of [0, 250, 500, 750, 1000]) {
+    svg.appendChild(svgEl('line', {x1: x(p), x2: x(p), y1: mt, y2: mt + ph, stroke: 'var(--line)', 'stroke-width': 1, 'stroke-dasharray': p % 1000 ? '2 3' : ''}));
+    svg.appendChild(svgEl('text', {x: x(p), y: mt + ph + 15, 'text-anchor': p === 0 ? 'start' : p === 1000 ? 'end' : 'middle'}, pct(p)));
+  }
+  svg.appendChild(svgEl('text', {x: ml + pw / 2, y: H - 3, 'text-anchor': 'middle'}, 'Pedal position'));
+  svg.appendChild(svgEl('text', {x: 11, y: mt + ph / 2, 'text-anchor': 'middle', transform: 'rotate(-90 11 ' + (mt + ph / 2) + ')'}, 'Torque'));
+
+  // smoothing applies below this output level
+  if (c.TSMOOTH > 0 && c.TSMOOTHCUT > 0) {
+    svg.appendChild(svgEl('line', {x1: ml, x2: ml + pw, y1: y(c.TSMOOTHCUT), y2: y(c.TSMOOTHCUT), stroke: 'var(--muted)', 'stroke-dasharray': '6 4'}));
+    // left side: the curve is in regen/coast there, so the label stays clear of the map points
+    svg.appendChild(svgEl('text', {x: ml + 4, y: y(c.TSMOOTHCUT) - 5}, 'Smoothing below ' + pct(c.TSMOOTHCUT)));
+  }
+
+  // curves (creep only applies at exactly 0 pedal, so it's drawn as a marker instead)
+  const path = cfg => {
+    let d = '';
+    for (let p = cfg.TCREEP > 0 ? 1 : 0; p <= 1000; p++) d += (d ? 'L' : 'M') + x(p).toFixed(1) + ' ' + y(mapPedal(cfg, p)).toFixed(1);
+    return d;
+  };
+  if (preview) svg.appendChild(svgEl('path', {d: path(saved), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 2, 'stroke-dasharray': '5 4'}));
+  svg.appendChild(svgEl('path', {d: path(c), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2, 'stroke-linejoin': 'round'}));
+
+  // parameter markers
+  const dot = (p, t, color, label, below) => {
+    svg.appendChild(svgEl('circle', {cx: x(p), cy: y(t), r: 4.5, fill: color, stroke: 'var(--panel)', 'stroke-width': 2}));
+    if (label) svg.appendChild(svgEl('text', {class: 'lbl', x: x(p), y: y(t) + (below ? 17 : -9), 'text-anchor': p > 960 ? 'end' : p < 40 ? 'start' : 'middle'}, label));
+  };
+  if (c.TRNGMIN > c.TRNGMAX) {
+    dot(c.TRNGMAX, -10 * c.TMAXRN, 'var(--ok)', '', true);
+    dot(c.TRNGMIN, -10 * c.TMINRN, 'var(--ok)', '', true);
+  }
+  dot(c.TFWD, 0, 'var(--accent)', '', true);
+  const seen = new Set();
+  [[c.TMAP1IN, c.TMAP1OUT], [c.TMAP2IN, c.TMAP2OUT], [c.TMAP3IN, c.TMAP3OUT]].forEach(([i, o], n) => {
+    if (i < c.TFWD) return;
+    const key = i + ',' + o, dup = seen.has(key);   // defaults stack all three points
+    seen.add(key);
+    if (!dup) dot(i, mapPedal(c, i), 'var(--accent)', 'M' + (n + 1));
+  });
+  if (c.TCREEP > 0) dot(0, 10 * c.TCREEP, 'var(--accent)', 'Creep');
+
+  // hover layer
+  const vline = svgEl('line', {y1: mt, y2: mt + ph, stroke: 'var(--muted)', 'stroke-width': 1, visibility: 'hidden'});
+  const hdot = svgEl('circle', {r: 4.5, fill: 'var(--accent)', stroke: 'var(--panel)', 'stroke-width': 2, visibility: 'hidden'});
+  tc.live = svgEl('circle', {r: 6, fill: 'var(--warn)', stroke: 'var(--panel)', 'stroke-width': 2, visibility: 'hidden'});
+  const hit = svgEl('rect', {x: ml, y: 0, width: pw, height: H, fill: 'transparent'});
+  svg.append(vline, hdot, tc.live, hit);
+  const move = ev => {
+    const r = svg.getBoundingClientRect();
+    const p = Math.round(Math.max(0, Math.min(1000, (ev.clientX - r.left - ml) / pw * 1000)));
+    const t = mapPedal(c, p);
+    vline.setAttribute('x1', x(p)); vline.setAttribute('x2', x(p));
+    hdot.setAttribute('cx', x(p)); hdot.setAttribute('cy', y(t));
+    vline.setAttribute('visibility', 'visible'); hdot.setAttribute('visibility', 'visible');
+    tc.tip.textContent = 'Pedal ' + pct(p) + ' → ' + (t < 0 ? 'regen ' + pct(-t) : t > 0 ? pct(t) + ' torque' : 'no torque');
+    tc.tip.classList.remove('hidden');
+    const tx = 12 + x(p), tw = tc.tip.offsetWidth;
+    tc.tip.style.left = (tx + tw + 12 > W ? tx - tw - 24 : tx + 10) + 'px';
+    tc.tip.style.top = Math.max(0, Math.min(y(t) - 14, H - 30)) + 'px';
+  };
+  hit.onpointermove = move;
+  hit.onpointerdown = move;
+  hit.onpointerleave = () => { vline.setAttribute('visibility', 'hidden'); hdot.setAttribute('visibility', 'hidden'); tc.tip.classList.add('hidden'); };
+  tc.svgWrap.replaceChildren(svg);
+
+  // legend
+  const item = (cls, text) => { const s = el('span'); s.append(el('span', 'sw' + cls), text); return s; };
+  tc.legend.replaceChildren(item('', preview ? 'Preview of unsaved edits' : 'Current map'));
+  if (preview) tc.legend.appendChild(item(' saved', 'Saved map'));
+  tc.liveLegend = item(' dot', 'Live pedal');
+  tc.liveLegend.classList.add('hidden');
+  tc.legend.appendChild(tc.liveLegend);
+  updateThrottleLive();
+}
+function updateThrottleLive() {
+  const tc = throttleChart;
+  if (!tc || !tc.live || !tc.card.isConnected) return;
+  const p = Number(statusValues.Pedal_Position), t = Number(statusValues.Raw_Throttle);
+  const ok = 'Pedal_Position' in statusValues && 'Raw_Throttle' in statusValues && isFinite(p) && isFinite(t);
+  tc.live.setAttribute('visibility', ok ? 'visible' : 'hidden');
+  tc.liveLegend.classList.toggle('hidden', !ok);
+  if (ok) { tc.live.setAttribute('cx', tc.x(p)); tc.live.setAttribute('cy', tc.y(Math.max(-1000, Math.min(1000, t)))); }
 }
 function onCfgResult(r) {
   delete pendingSets[r.CfgName];
@@ -424,7 +621,9 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   $('tab-status').classList.toggle('hidden', b.dataset.tab !== 'status');
   $('tab-config').classList.toggle('hidden', b.dataset.tab !== 'config');
   try { localStorage.setItem('gevcuTab', b.dataset.tab); } catch (e) {}
+  redrawThrottle();   // width is 0 while the tab is hidden
 });
+window.addEventListener('resize', redrawThrottle);
 $('statusFilter').oninput = renderStatus;
 $('statusRefresh').onclick = () => { send({GetStatusList: 1}); send({GetStatus: 1}); };
 $('cfgFilter').oninput = renderConfig;
